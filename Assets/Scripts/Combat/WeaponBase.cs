@@ -18,6 +18,11 @@ public class WeaponBase : MonoBehaviour
 
     [Header("Hitscan")]
     [SerializeField] private float maxDistance = 100f;
+    [SerializeField] private bool showBulletTracer = true;
+    [SerializeField] private float tracerWidth = 0.02f;
+    [SerializeField] private float tracerDuration = 0.1f;
+    [SerializeField] private Color tracerColor = Color.yellow;
+    [SerializeField] private Material tracerMaterial;
 
     [Header("Projectile")]
     [SerializeField] private Projectile projectilePrefab;
@@ -28,8 +33,9 @@ public class WeaponBase : MonoBehaviour
     [SerializeField] private Transform weaponModel;
     [SerializeField] private float recoilDistance = 0.1f;
     [SerializeField] private float recoilReturnSpeed = 12f;
-    [SerializeField] private GameObject muzzleFlash;
+    [SerializeField] private GameObject muzzleFlashPrefab;
     [SerializeField] private float muzzleFlashDuration = 0.05f;
+    [SerializeField] private float muzzleFlashScale = 0.1f;
     [SerializeField] private AudioSource audioSource;
     [SerializeField] private AudioClip fireClip;
 
@@ -38,15 +44,23 @@ public class WeaponBase : MonoBehaviour
     private Vector3 baseLocalPosition;
     private Coroutine recoilRoutine;
     private Coroutine flashRoutine;
+    private GameObject muzzleFlashInstance;
 
     public string WeaponName => weaponName;
+
+    private void Awake()
+    {
+        CacheBasePose();
+        EnsureMuzzleFlashInstance();
+    }
 
     private void OnEnable()
     {
         CacheBasePose();
-        if (muzzleFlash != null)
+        EnsureMuzzleFlashInstance();
+        if (muzzleFlashInstance != null)
         {
-            muzzleFlash.SetActive(false);
+            muzzleFlashInstance.SetActive(false);
         }
     }
 
@@ -82,9 +96,14 @@ public class WeaponBase : MonoBehaviour
 
     private void FireHitscan()
     {
+        Transform firePoint = projectileSpawnPoint != null ? projectileSpawnPoint : transform;
         Ray ray = new Ray(ownerCamera.transform.position, ownerCamera.transform.forward);
+        Vector3 hitPoint;
+        
         if (Physics.Raycast(ray, out RaycastHit hit, maxDistance, hitMask, QueryTriggerInteraction.Ignore))
         {
+            hitPoint = hit.point;
+            
             if (hit.collider.TryGetComponent(out IDamageable damageable))
             {
                 damageable.ApplyDamage(damage, hit.point, hit.normal);
@@ -94,6 +113,15 @@ public class WeaponBase : MonoBehaviour
                 IDamageable parentDamageable = hit.collider.GetComponentInParent<IDamageable>();
                 parentDamageable?.ApplyDamage(damage, hit.point, hit.normal);
             }
+        }
+        else
+        {
+            hitPoint = ray.origin + ray.direction * maxDistance;
+        }
+        
+        if (showBulletTracer)
+        {
+            DrawBulletTracer(firePoint.position, hitPoint);
         }
     }
 
@@ -143,7 +171,7 @@ public class WeaponBase : MonoBehaviour
 
     private void TriggerMuzzleFlash()
     {
-        if (muzzleFlash == null)
+        if (muzzleFlashInstance == null)
         {
             return;
         }
@@ -152,14 +180,15 @@ public class WeaponBase : MonoBehaviour
         {
             StopCoroutine(flashRoutine);
         }
+
         flashRoutine = StartCoroutine(MuzzleFlashRoutine());
     }
 
     private IEnumerator MuzzleFlashRoutine()
     {
-        muzzleFlash.SetActive(true);
+        muzzleFlashInstance.SetActive(true);
         yield return new WaitForSeconds(muzzleFlashDuration);
-        muzzleFlash.SetActive(false);
+        muzzleFlashInstance.SetActive(false);
         flashRoutine = null;
     }
 
@@ -177,5 +206,98 @@ public class WeaponBase : MonoBehaviour
     {
         Transform target = weaponModel != null ? weaponModel : transform;
         baseLocalPosition = target.localPosition;
+    }
+
+    private void EnsureMuzzleFlashInstance()
+    {
+        if (muzzleFlashPrefab == null)
+        {
+            muzzleFlashInstance = null;
+            return;
+        }
+
+        if (muzzleFlashInstance == null)
+        {
+            Transform anchor = GetMuzzleFlashAnchor();
+
+            if (muzzleFlashPrefab.scene.IsValid())
+            {
+                muzzleFlashInstance = muzzleFlashPrefab;
+            }
+            else
+            {
+                muzzleFlashInstance = Instantiate(muzzleFlashPrefab, anchor);
+            }
+        }
+
+        Transform currentAnchor = GetMuzzleFlashAnchor();
+        muzzleFlashInstance.transform.SetParent(currentAnchor, false);
+        muzzleFlashInstance.transform.localPosition = Vector3.zero;
+        muzzleFlashInstance.transform.localRotation = Quaternion.Euler(0f, 0f, 0f);
+        muzzleFlashInstance.transform.localScale = Vector3.one * muzzleFlashScale;
+        muzzleFlashInstance.SetActive(false);
+        
+        // Adiciona billboard se não tiver
+        if (muzzleFlashInstance.GetComponent<BillboardSprite>() == null)
+        {
+            BillboardSprite billboard = muzzleFlashInstance.AddComponent<BillboardSprite>();
+            billboard.SetCamera(ownerCamera);
+        }
+    }
+
+    private Transform GetMuzzleFlashAnchor()
+    {
+        if (projectileSpawnPoint != null)
+        {
+            return projectileSpawnPoint;
+        }
+
+        return transform;
+    }
+
+    private void DrawBulletTracer(Vector3 start, Vector3 end)
+    {
+        GameObject tracerObj = new GameObject("BulletTracer");
+        LineRenderer line = tracerObj.AddComponent<LineRenderer>();
+        
+        line.positionCount = 2;
+        line.SetPosition(0, start);
+        line.SetPosition(1, end);
+        line.startWidth = tracerWidth;
+        line.endWidth = tracerWidth;
+        line.startColor = tracerColor;
+        line.endColor = tracerColor;
+        
+        if (tracerMaterial != null)
+        {
+            line.material = tracerMaterial;
+        }
+        else
+        {
+            line.material = new Material(Shader.Find("Sprites/Default"));
+            line.material.color = tracerColor;
+        }
+        
+        StartCoroutine(FadeOutTracer(line, tracerObj));
+    }
+
+    private IEnumerator FadeOutTracer(LineRenderer line, GameObject tracerObj)
+    {
+        float elapsed = 0f;
+        Color startColor = line.startColor;
+        Color endColor = line.endColor;
+        
+        while (elapsed < tracerDuration)
+        {
+            elapsed += Time.deltaTime;
+            float alpha = 1f - (elapsed / tracerDuration);
+            
+            line.startColor = new Color(startColor.r, startColor.g, startColor.b, alpha);
+            line.endColor = new Color(endColor.r, endColor.g, endColor.b, alpha);
+            
+            yield return null;
+        }
+        
+        Destroy(tracerObj);
     }
 }
